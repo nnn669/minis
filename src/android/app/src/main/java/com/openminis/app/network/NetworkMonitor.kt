@@ -34,14 +34,14 @@ class NetworkMonitor {
         /**
          * [T-android-stale-conn-retry-hang] App-wide ConnectionPool shared by
          * every long-lived LLM provider OkHttpClient (OpenAI / Anthropic /
-         * Gemini) — OkHttp explicitly supports sharing one pool across
+         * Gemini) - OkHttp explicitly supports sharing one pool across
          * clients. Routing them all through this instance is what lets
          * [evictConnectionPool] actually reach provider connections:
          * previously eviction only covered the single client registered via
          * [start], and MinisApp registers none, so eviction was a no-op.
          * Through a local VPN/proxy (e.g. clash at 127.0.0.1:7890) the TCP
          * socket to localhost survives network flaps, so the pool kept
-         * handing the dead h2 tunnel to every retry — requests wrote into it
+         * handing the dead h2 tunnel to every retry - requests wrote into it
          * and hung forever waiting for response headers.
          */
         val sharedLLMConnectionPool = okhttp3.ConnectionPool(
@@ -52,25 +52,19 @@ class NetworkMonitor {
     private val _status = MutableStateFlow(NetworkStatus.DISCONNECTED)
     val status: StateFlow<NetworkStatus> = _status.asStateFlow()
 
-    private val availableNetworks = mutableSetOf<Network>()
+    private val availableNetworks = AvailableNetworkTracker<Network>()
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var okHttpClient: OkHttpClient? = null
     private var appContext: Context? = null
 
-    /**
-     * Background scope for DNS-refresh side effects. Kept off the callback
-     * thread so ConnectivityManager isn't held up by file I/O.
-     */
+    /** Keep DNS-refresh file I/O off the ConnectivityManager callback thread. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Registers a network callback to observe connectivity changes.
      * Optionally accepts a shared OkHttpClient whose connection pool will be
      * evicted on network transitions.
-     *
-     * @param context Application or activity context.
-     * @param client Optional shared OkHttpClient for connection pool eviction.
      */
     fun start(context: Context, client: OkHttpClient? = null) {
         okHttpClient = client
@@ -83,28 +77,19 @@ class NetworkMonitor {
             return
         }
 
-        synchronized(availableNetworks) {
-            availableNetworks.clear()
-        }
+        availableNetworks.clear()
 
-        // Set initial state
         val activeNetwork = cm.activeNetwork
         val capabilities = activeNetwork?.let { cm.getNetworkCapabilities(it) }
-        if (activeNetwork != null && capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
-            synchronized(availableNetworks) {
-                availableNetworks.add(activeNetwork)
-            }
+        val initiallyConnected = capabilities?.hasCapability(
+            NetworkCapabilities.NET_CAPABILITY_INTERNET
+        ) == true
+        if (activeNetwork != null && initiallyConnected) {
+            availableNetworks.update(activeNetwork, available = true)
         }
-        _status.value = if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
-            NetworkStatus.CONNECTED
-        } else {
-            NetworkStatus.DISCONNECTED
-        }
-        Log.d(TAG, "Initial network status: ${_status.value}")
+        updateStatus(initiallyConnected, "Initial network status")
 
-        // Mirror iOS NetworkMonitor.swift:23-26 — do an immediate DNS write so
-        // resolv.conf is populated before the first NetworkCallback fires. The
-        // callback is async and can lag by hundreds of ms on cold start.
+        // Populate resolv.conf before the asynchronous callback first fires.
         refreshSandboxDns("initial")
 
         val request = NetworkRequest.Builder()
@@ -112,42 +97,20 @@ class NetworkMonitor {
             .build()
 
         val callback = object : ConnectivityManager.NetworkCallback() {
-
             override fun onAvailable(network: Network) {
-                val previousStatus = _status.value
-                synchronized(availableNetworks) {
-                    availableNetworks.add(network)
+                val update = availableNetworks.update(network, available = true)
+                updateStatus(update.isConnected, "Network available")
+                if (update.membershipChanged) {
+                    handleRouteChange("onAvailable")
                 }
-                _status.value = NetworkStatus.CONNECTED
-                if (previousStatus == NetworkStatus.DISCONNECTED) {
-                    Log.d(TAG, "Network transition: DISCONNECTED -> CONNECTED")
-                }
-                // onAvailable can mean a Wi-Fi/cellular route was added while
-                // another network remained available. The old pool is still
-                // unsafe in that case, so evict on every new route rather than
-                // only after a DISCONNECTED state.
-                evictConnectionPool()
-                refreshSandboxDns("onAvailable")
             }
 
             override fun onLost(network: Network) {
-                val hasAvailableNetwork = synchronized(availableNetworks) {
-                    availableNetworks.remove(network)
-                    availableNetworks.isNotEmpty()
+                val update = availableNetworks.update(network, available = false)
+                updateStatus(update.isConnected, "Network lost")
+                if (update.membershipChanged) {
+                    handleRouteChange("onLost")
                 }
-                val previousStatus = _status.value
-                _status.value = if (hasAvailableNetwork) {
-                    NetworkStatus.CONNECTED
-                } else {
-                    NetworkStatus.DISCONNECTED
-                }
-                if (previousStatus != _status.value) {
-                    Log.d(TAG, "Network transition: $previousStatus -> ${_status.value}")
-                }
-                // Connections bound to the lost route must not be reused,
-                // even when another route keeps the app logically connected.
-                evictConnectionPool()
-                refreshSandboxDns("onLost")
             }
 
             override fun onCapabilitiesChanged(
@@ -157,32 +120,22 @@ class NetworkMonitor {
                 val hasInternet = networkCapabilities.hasCapability(
                     NetworkCapabilities.NET_CAPABILITY_INTERNET
                 )
-                val hasAvailableNetwork = synchronized(availableNetworks) {
-                    if (hasInternet) availableNetworks.add(network) else availableNetworks.remove(network)
-                    availableNetworks.isNotEmpty()
+                val update = availableNetworks.update(network, hasInternet)
+                updateStatus(update.isConnected, "Network capabilities changed")
+                if (update.membershipChanged) {
+                    handleRouteChange("onCapabilitiesChanged")
                 }
-                val newStatus = if (hasAvailableNetwork) NetworkStatus.CONNECTED else NetworkStatus.DISCONNECTED
-                if (newStatus != _status.value) {
-                    Log.d(TAG, "Network capabilities changed: ${_status.value} -> $newStatus")
-                    _status.value = newStatus
-                }
-                // Capability changes can accompany validated-route and
-                // metered-network changes without changing CONNECTED state.
-                // They can still invalidate the route selected by OkHttp and
-                // can carry different DNS servers.
-                evictConnectionPool()
-                refreshSandboxDns("onCapabilitiesChanged")
             }
 
             override fun onLinkPropertiesChanged(
                 network: Network,
                 linkProperties: LinkProperties
             ) {
-                // DNS, routes, and proxy settings can change while the
-                // network remains available. Treat that as a new transport so
-                // no pooled HTTP/2 connection survives the route change.
-                evictConnectionPool()
-                refreshSandboxDns("onLinkPropertiesChanged")
+                // DNS, routes, and proxy settings can change while the same
+                // network remains available. Existing HTTP/2 connections may
+                // still be pinned to the obsolete route.
+                Log.d(TAG, "Link properties changed for $network: $linkProperties")
+                handleRouteChange("onLinkPropertiesChanged")
             }
         }
 
@@ -191,9 +144,7 @@ class NetworkMonitor {
         Log.d(TAG, "Network monitoring started")
     }
 
-    /**
-     * Unregisters the network callback. Should be called during cleanup.
-     */
+    /** Unregisters the network callback. */
     fun stop() {
         networkCallback?.let { callback ->
             try {
@@ -207,33 +158,46 @@ class NetworkMonitor {
         connectivityManager = null
         okHttpClient = null
         appContext = null
-        synchronized(availableNetworks) {
-            availableNetworks.clear()
+        availableNetworks.clear()
+        _status.value = NetworkStatus.DISCONNECTED
+    }
+
+    private fun updateStatus(isConnected: Boolean, reason: String) {
+        val newStatus = if (isConnected) {
+            NetworkStatus.CONNECTED
+        } else {
+            NetworkStatus.DISCONNECTED
+        }
+        val previousStatus = _status.value
+        if (previousStatus != newStatus) {
+            _status.value = newStatus
+            Log.d(TAG, "$reason: $previousStatus -> $newStatus")
+        } else if (reason == "Initial network status") {
+            Log.d(TAG, "$reason: $newStatus")
         }
     }
 
+    private fun handleRouteChange(reason: String) {
+        evictConnectionPool()
+        refreshSandboxDns(reason)
+    }
+
     /**
-     * Evicts all idle connections from the OkHttp connection pools
-     * to prevent stale connection reuse after a network change.
-     * Always evicts [sharedLLMConnectionPool] (all LLM provider clients),
-     * plus the optional client registered via [start].
+     * Evicts all idle connections from the OkHttp connection pools.
+     * Always evicts [sharedLLMConnectionPool], plus the optional client
+     * registered via [start].
      */
     private fun evictConnectionPool() {
         sharedLLMConnectionPool.evictAll()
-        okHttpClient?.connectionPool?.evictAll()
-        Log.d(TAG, "OkHttp connection pools evicted (shared LLM pool + registered client)")
+        okHttpClient?.connectionPool?.let { pool ->
+            if (pool !== sharedLLMConnectionPool) pool.evictAll()
+        }
+        Log.d(TAG, "OkHttp connection pools evicted")
     }
 
     /**
      * Refresh the sandbox rootfs' /etc/resolv.conf from the current system
-     * DNS configuration. Runs on IO so we don't block the ConnectivityManager
-     * callback thread with file I/O. Safe to call before the rootfs has been
-     * extracted — [RootfsManager.refreshDns] no-ops when the rootfs is missing.
-     *
-     * Mirrors iOS NetworkMonitor.swift:26,60 which calls refreshDns() on every
-     * NWPath update so already-running shells pick up the new nameservers the
-     * next time they resolve a hostname (musl's getaddrinfo re-reads
-     * resolv.conf on each lookup — no cache to invalidate).
+     * DNS configuration. Safe before rootfs extraction; refreshDns no-ops.
      */
     private fun refreshSandboxDns(reason: String) {
         val ctx = appContext ?: return

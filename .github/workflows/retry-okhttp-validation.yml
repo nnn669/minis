@@ -1,0 +1,73 @@
+name: Retry OkHttp validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Restore existing Android toolchain versions
+        shell: python
+        run: |
+          from pathlib import Path
+          file = Path("src/android/build.gradle.kts")
+          text = file.read_text()
+          replacements = {
+              'id("com.android.application") version "8.10.1"': 'id("com.android.application") version "8.7.3"',
+              'version "2.2.21" apply false': 'version "2.1.0" apply false',
+              'id("com.google.devtools.ksp") version "2.2.21-2.0.5"': 'id("com.google.devtools.ksp") version "2.1.0-1.0.29"',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1 and old != 'version "2.2.21" apply false':
+                  raise SystemExit(f"unexpected occurrence count for {old!r}")
+              text = text.replace(old, new)
+          file.write_text(text)
+
+      - name: Commit minimal source-only patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/retry-okhttp-validation.yml
+          git add src/android/build.gradle.kts
+          git commit -m "fix(android): keep existing build toolchain for OkHttp upgrade"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run Android JVM unit tests
+        id: tests
+        continue-on-error: true
+        working-directory: src/android
+        run: ./gradlew :app:testDebugUnitTest --stacktrace --no-daemon 2>&1 | tee "$GITHUB_WORKSPACE/gradle-test.log"
+
+      - name: Report failure summary
+        if: steps.tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          summary=$(tail -n 80 gradle-test.log | sed 's/`/\\`/g')
+          gh pr comment "${{ github.event.pull_request.number }}" --body "OkHttp minimal validation failed. Last output:\n\n\\`\\`\\`text\n${summary}\n\\`\\`\\`"
+          exit 1

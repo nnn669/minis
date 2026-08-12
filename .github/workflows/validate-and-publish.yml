@@ -1,4 +1,4 @@
-name: Validate & publish v0.22-preview
+name: Validate & publish v0.23-preview
 
 on:
   workflow_dispatch:
@@ -104,7 +104,7 @@ jobs:
           cd src/android
           ./gradlew -Dorg.gradle.jvmargs=-Xmx4g :app:assembleRelease --stacktrace
 
-      - name: Publish test release v0.22-preview
+      - name: Publish test release v0.23-preview
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -114,32 +114,30 @@ jobs:
           test -n "$APK"
           echo "APK: $APK ($(du -h "$APK" | cut -f1))"
           cat > /tmp/release-notes.md <<'EOF'
-          ## v0.22-preview（2026-08-12）测试版
+          ## v0.23-preview（2026-08-13）测试版
+
+          ### 修复：沙盒 / Shell 无法启动（本次核心）
+          - 根因：此前发布到 v0.22-preview 的 APK 是 **debug 构建**（debuggable=true），PRoot 沙箱在调试运行时（malloc debug / 调试态 ptrace）下启动即崩溃，表现为 proot 进程启动后立即退出、所有 shell 命令返回 "[Shell not running]"、根文件系统设置页空白。
+          - 修复：CI 改为 **assembleRelease**（release 构建 debuggable=false，沿用 debug 签名、无需 keystore），与上游正常 APK 一致。
+          - 同步：proot 改用 NDK r28 构建并加 16KB 页对齐（-Wl,-z,max-page-size=16384），与上游二进制对齐；CI 增加 NDK r28 显式校验（readelf LOAD 对齐检查），防止再静默退回旧 NDK；prepare_android_sandbox.sh 修复失效的 Termux proot 下载链接（5.1.107-70 → 5.1.107.89）。
+          - 已安装 0.21 / 0.22 的用户：App 内"检查更新"即可收到本包（更新源已固定为本仓库）。
 
           ### 修复：内置升级不再推送上游版本
-          - 根因：UpdateChecker 的更新源硬编码为上游 OpenMinis/OpenMinis，导致 0.21-preview 检查更新时收到上游 0.22-preview 的提示。
-          - 内置升级源改为本仓库 nnn669/minis，App 内"检查更新"只认本仓库 Release（含 APK 资产）。
-          - 关于页 GitHub 仓库链接同步指向 nnn669/minis。
-          - 版本 0.21-preview → 0.22-preview（versionCode 22）。
+          - 更新源固定为本仓库 nnn669/minis，不再检查上游 OpenMinis/OpenMinis 的 Release。
 
-          ### 修复：沙箱 shell 无法启动（release 构建）
-          - 根因：CI 此前产出 **debug APK**（debuggable=true），PRoot 沙箱在调试运行时环境（malloc debug / 调试态 ptrace）下启动即崩溃，表现为终端堆转储 + "[Shell not running]"。
-          - 修复：CI 改为 **assembleRelease**（release 构建 debuggable=false，与上游正常 APK 一致；沿用 debug 签名，无需 keystore）。
-          - 同步：proot 构建改用 NDK r28 并加 16KB 页对齐（`max-page-size=16384`），与上游二进制对齐；CI 增加 NDK 版本校验，防止再静默退回旧 NDK。
-
-          提交：a75fa69（UpdateChecker 更新源）、4fbe2ec（About 链接）、fa3bcb0（版本号）
+          提交：c478e301（release 构建 + NDK r28 proot）、1097d58e（NDK r28 CI 校验）、a75fa69（更新源）、4fbe2ec（About 链接）、fa3bcb0（版本号）
           EOF
-          if gh release view v0.22-preview >/dev/null 2>&1; then
-            gh release upload v0.22-preview "$APK" --clobber
+          if gh release view v0.23-preview >/dev/null 2>&1; then
+            gh release upload v0.23-preview "$APK" --clobber
           else
-            gh release create v0.22-preview "$APK" \
-              --title "v0.22-preview" \
+            gh release create v0.23-preview "$APK" \
+              --title "v0.23-preview" \
               --notes-file /tmp/release-notes.md
           fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: minis-v0.22-preview-apk
+          name: minis-v0.23-preview-apk
           path: src/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error

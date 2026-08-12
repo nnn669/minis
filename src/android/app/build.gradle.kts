@@ -97,6 +97,17 @@ android {
         noCompress += listOf("tar.gz", "proot-aarch64")
     }
 
+    packaging {
+        resources {
+            // [T-android-dup-osgi] okhttp 5.x / okio multi-release jars each
+            // embed META-INF/versions/9/OSGI-INF/MANIFEST.MF (OSGi metadata,
+            // unused at runtime on Android) — both surface at APK merge and
+            // fail packageDebug with DuplicateRelativeFileException. Exclude
+            // the duplicate; no runtime impact.
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
     }

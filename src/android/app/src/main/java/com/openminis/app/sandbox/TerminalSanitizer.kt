@@ -40,8 +40,11 @@ object TerminalSanitizer {
             .joinToString("\n")
             .replace(Regex("(?:null){2,}"), "") // Remove runs of 2+ consecutive "null"
 
-        // Pass 5: Collapse excessive blank lines (3+ consecutive → 2)
-        return noNullLines.replace(Regex("\n{3,}"), "\n\n").trim()
+        // Pass 5: Collapse excessive blank lines (3+ consecutive → 2).
+        // No trailing .trim() here: CR-folded output can legitimately keep
+        // leading/trailing spaces (e.g. wget progress bars " 100%[=========>]"
+        // or "complete   "), and a blanket trim would destroy that state.
+        return noNullLines.replace(Regex("\n{3,}"), "\n\n")
     }
 
     /**
@@ -59,9 +62,11 @@ object TerminalSanitizer {
 
     /**
      * Simulate CR (\r) behavior: when a line contains \r (without \n),
-     * the text after \r overwrites from the beginning of the line.
-     * Each \r resets the cursor to position 0, so only the last segment's
-     * content (up to its length) is visible.
+     * each \r resets the cursor to column 0 and the following text
+     * overwrites from there — exactly like a terminal carriage return.
+     * A shorter segment overwrites only its own width and keeps the tail
+     * of the previous content ("AAAA\rBB" → "BBAA"); a longer segment
+     * replaces the whole line ("10%\r50%\r100%" → "100%").
      */
     private fun foldCarriageReturns(text: String): String {
         val lines = text.split('\n')
@@ -75,13 +80,28 @@ object TerminalSanitizer {
                 continue
             }
 
-            // Split on CR and simulate overwriting.
-            // Each CR resets cursor to column 0. The last non-empty segment wins.
+            // Split on CR and simulate column-wise overwriting.
             val segments = line.split('\r')
-            val lastNonEmpty = segments.lastOrNull { it.isNotEmpty() }
-            if (lastNonEmpty != null) {
-                result.append(lastNonEmpty)
+            val buffer = StringBuilder()
+            var bufLen = 0
+
+            for (segment in segments) {
+                val len = segment.length
+                if (len >= bufLen) {
+                    // New segment is as long or longer — replace the visible line.
+                    buffer.setLength(0)
+                    buffer.append(segment)
+                    bufLen = len
+                } else {
+                    // New segment is shorter — overwrite the first len columns,
+                    // keeping the tail of the previous content.
+                    for (i in 0 until len) {
+                        buffer.setCharAt(i, segment[i])
+                    }
+                }
             }
+
+            result.append(buffer)
         }
 
         return result.toString()

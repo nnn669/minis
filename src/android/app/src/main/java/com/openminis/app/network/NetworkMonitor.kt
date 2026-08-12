@@ -2,6 +2,7 @@ package com.openminis.app.network
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -51,6 +52,7 @@ class NetworkMonitor {
     private val _status = MutableStateFlow(NetworkStatus.DISCONNECTED)
     val status: StateFlow<NetworkStatus> = _status.asStateFlow()
 
+    private val availableNetworks = mutableSetOf<Network>()
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var okHttpClient: OkHttpClient? = null
@@ -81,9 +83,18 @@ class NetworkMonitor {
             return
         }
 
+        synchronized(availableNetworks) {
+            availableNetworks.clear()
+        }
+
         // Set initial state
         val activeNetwork = cm.activeNetwork
         val capabilities = activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        if (activeNetwork != null && capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
+            synchronized(availableNetworks) {
+                availableNetworks.add(activeNetwork)
+            }
+        }
         _status.value = if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
             NetworkStatus.CONNECTED
         } else {
@@ -104,24 +115,38 @@ class NetworkMonitor {
 
             override fun onAvailable(network: Network) {
                 val previousStatus = _status.value
+                synchronized(availableNetworks) {
+                    availableNetworks.add(network)
+                }
                 _status.value = NetworkStatus.CONNECTED
                 if (previousStatus == NetworkStatus.DISCONNECTED) {
                     Log.d(TAG, "Network transition: DISCONNECTED -> CONNECTED")
-                    evictConnectionPool()
                 }
-                // Always refresh sandbox DNS on availability — an interface
-                // swap (Wi-Fi → cellular) can fire onAvailable without a
-                // prior onLost, and the new interface carries new DNS servers.
+                // onAvailable can mean a Wi-Fi/cellular route was added while
+                // another network remained available. The old pool is still
+                // unsafe in that case, so evict on every new route rather than
+                // only after a DISCONNECTED state.
+                evictConnectionPool()
                 refreshSandboxDns("onAvailable")
             }
 
             override fun onLost(network: Network) {
-                _status.value = NetworkStatus.DISCONNECTED
-                Log.d(TAG, "Network transition: CONNECTED -> DISCONNECTED")
+                val hasAvailableNetwork = synchronized(availableNetworks) {
+                    availableNetworks.remove(network)
+                    availableNetworks.isNotEmpty()
+                }
+                val previousStatus = _status.value
+                _status.value = if (hasAvailableNetwork) {
+                    NetworkStatus.CONNECTED
+                } else {
+                    NetworkStatus.DISCONNECTED
+                }
+                if (previousStatus != _status.value) {
+                    Log.d(TAG, "Network transition: $previousStatus -> ${_status.value}")
+                }
+                // Connections bound to the lost route must not be reused,
+                // even when another route keeps the app logically connected.
                 evictConnectionPool()
-                // Rewrite resolv.conf even when disconnected so it falls back
-                // to 8.8.8.8 / 8.8.4.4 instead of sitting stale with a DNS
-                // server that's no longer reachable.
                 refreshSandboxDns("onLost")
             }
 
@@ -132,13 +157,32 @@ class NetworkMonitor {
                 val hasInternet = networkCapabilities.hasCapability(
                     NetworkCapabilities.NET_CAPABILITY_INTERNET
                 )
-                val newStatus = if (hasInternet) NetworkStatus.CONNECTED else NetworkStatus.DISCONNECTED
+                val hasAvailableNetwork = synchronized(availableNetworks) {
+                    if (hasInternet) availableNetworks.add(network) else availableNetworks.remove(network)
+                    availableNetworks.isNotEmpty()
+                }
+                val newStatus = if (hasAvailableNetwork) NetworkStatus.CONNECTED else NetworkStatus.DISCONNECTED
                 if (newStatus != _status.value) {
                     Log.d(TAG, "Network capabilities changed: ${_status.value} -> $newStatus")
                     _status.value = newStatus
-                    evictConnectionPool()
-                    refreshSandboxDns("onCapabilitiesChanged")
                 }
+                // Capability changes can accompany validated-route and
+                // metered-network changes without changing CONNECTED state.
+                // They can still invalidate the route selected by OkHttp and
+                // can carry different DNS servers.
+                evictConnectionPool()
+                refreshSandboxDns("onCapabilitiesChanged")
+            }
+
+            override fun onLinkPropertiesChanged(
+                network: Network,
+                linkProperties: LinkProperties
+            ) {
+                // DNS, routes, and proxy settings can change while the
+                // network remains available. Treat that as a new transport so
+                // no pooled HTTP/2 connection survives the route change.
+                evictConnectionPool()
+                refreshSandboxDns("onLinkPropertiesChanged")
             }
         }
 
@@ -163,6 +207,9 @@ class NetworkMonitor {
         connectivityManager = null
         okHttpClient = null
         appContext = null
+        synchronized(availableNetworks) {
+            availableNetworks.clear()
+        }
     }
 
     /**

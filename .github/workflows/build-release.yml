@@ -1,0 +1,159 @@
+name: Build v0.20-preview APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-v0.20-preview
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RELEASE_TAG: v0.20-preview
+      RELEASE_NAME: OpenMinis 0.20-preview
+      SOURCE_SHA: fadbe05f39f50ec45301602dda45d4dd5a02116a
+      NDK_VERSION: 28.0.13004108
+      APK_NAME: OpenMinis-0.20-preview-arm64-v8a.apk
+    steps:
+      - name: Check out verified source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare public build customization
+        shell: bash
+        run: |
+          cp src/android/app/provider-customization.properties.example \
+            src/android/app/provider-customization.properties
+
+      - name: Build PRoot sandbox binary
+        shell: bash
+        run: ./deps/build_proot.sh clean
+
+      - name: Prepare Alpine sandbox
+        shell: bash
+        run: ./scripts/prepare_android_sandbox.sh
+
+      - name: Verify sandbox assets
+        shell: bash
+        run: |
+          test -s src/android/app/src/main/assets/proot-aarch64
+          test -s src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+          test -s src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+          file src/android/app/src/main/assets/proot-aarch64 | grep -q 'ARM aarch64'
+
+      - name: Run verified network transition tests
+        working-directory: src/android
+        shell: bash
+        run: |
+          ./gradlew --no-daemon :app:testDebugUnitTest \
+            --tests com.openminis.app.network.AvailableNetworkTrackerTest
+
+      - name: Build release APK
+        working-directory: src/android
+        shell: bash
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify and stage APK
+        shell: bash
+        run: |
+          APK_PATH="$(find src/android/app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          test -n "$APK_PATH"
+          test -s "$APK_PATH"
+          mkdir -p dist
+          cp "$APK_PATH" "dist/${APK_NAME}"
+          unzip -l "dist/${APK_NAME}" | grep -q 'assets/proot-aarch64'
+          unzip -l "dist/${APK_NAME}" | grep -q 'assets/alpine-minirootfs.tar.gz'
+          APKSIGNER="${ANDROID_SDK_ROOT}/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "dist/${APK_NAME}"
+          (cd dist && sha256sum "${APK_NAME}" > "${APK_NAME}.sha256")
+          cat "dist/${APK_NAME}.sha256"
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## 改动清单
+
+          - 将 OkHttp、OkHttp SSE 和 MockWebServer 从 4.12.0 升级到 5.4.0，启用更可靠的 IPv4/IPv6 Happy Eyeballs 连接策略。
+          - 正确跟踪 Wi-Fi、蜂窝等并存网络，单个网络丢失时不再错误报告设备断网。
+          - 网络新增、丢失或链路属性变化时清理共享 OkHttp 连接池，避免继续复用失效路由。
+          - Models.dev API 接入共享连接池，统一网络切换恢复行为。
+          - 避免重复网络回调反复清理连接池。
+          - 新增多网络切换、最后网络丢失、重复回调与状态清理测试。
+
+          ## 构建信息
+
+          - 版本：`0.20-preview` (`versionCode 20`)
+          - 平台：Android arm64-v8a，minSdk 26，targetSdk 35
+          - 源码提交：`fadbe05f39f50ec45301602dda45d4dd5a02116a`
+          - 构建类型：release，使用项目配置的 debug signing config 签名
+          - 构建时公开版 Anthropic OAuth 标识为空；API Key 登录及其他提供商不受影响
+
+          ## 验证
+
+          - PRoot aarch64 原生沙盒从源码构建并验证 ELF 架构
+          - Alpine 3.21.3 aarch64 minirootfs 已打入 APK
+          - `AvailableNetworkTrackerTest` 通过
+          - `:app:assembleRelease` 通过
+          - APK 签名与沙盒资产检查通过
+
+          下载 APK 后可使用同名 `.sha256` 文件校验完整性。
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            "dist/${APK_NAME}" \
+            "dist/${APK_NAME}.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" \
+            --title "$RELEASE_NAME" \
+            --notes-file release-notes.md \
+            --prerelease
+
+      - name: Remove one-time build workflow
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          WORKFLOW_PATH='.github/workflows/build-release.yml'
+          WORKFLOW_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${WORKFLOW_PATH}?ref=main" --jq .sha)"
+          gh api --method DELETE \
+            "repos/${GITHUB_REPOSITORY}/contents/${WORKFLOW_PATH}" \
+            -f message='ci: remove completed v0.20-preview build workflow' \
+            -f sha="$WORKFLOW_SHA" \
+            -f branch='main'

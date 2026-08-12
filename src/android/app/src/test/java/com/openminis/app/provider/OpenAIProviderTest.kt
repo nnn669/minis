@@ -86,7 +86,10 @@ class OpenAIProviderTest {
 
         val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
 
-        assertEquals(100, response.usage?.inputTokens)
+        // parseChatCompletionsUsage reports inputTokens as FRESH-only: the
+        // cached portion is subtracted (100 - 50 = 50), matching the
+        // Anthropic convention. latestContextTokens carries the full 100.
+        assertEquals(50, response.usage?.inputTokens)
         assertEquals(10, response.usage?.outputTokens)
         assertEquals(50, response.usage?.cacheReadInputTokens)
         assertNull(response.usage?.cacheCreationInputTokens)
@@ -104,17 +107,20 @@ class OpenAIProviderTest {
         assertNull(response.usage?.cacheReadInputTokens)
     }
 
-    @Test
+    @Test(expected = LLMError.TransientError::class)
     fun `sendMessage handles empty choices`() = runBlocking {
+        // failOnSilentEmptyCompletion: a stream whose only event carries an
+        // empty choices array emits zero Text chunks, which the provider
+        // treats as a silent empty completion and surfaces as a
+        // TransientError — never as a blank successful response.
         server.enqueue(
             sseMock(
                 """{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":0}}"""
             )
         )
 
-        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
-        assertEquals("", response.text)
-        assertNull(response.stopReason)
+        provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        Unit
     }
 
     // -- Request construction --

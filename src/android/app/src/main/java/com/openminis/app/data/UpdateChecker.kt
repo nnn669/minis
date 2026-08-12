@@ -34,13 +34,12 @@ import java.util.concurrent.TimeUnit
 object UpdateChecker {
 
     private const val TAG = "UpdateChecker"
-    private const val OWNER = "OpenMinis"
-    // T133: the public repo is OpenMinis/OpenMinis (org + repo share a name).
-    // Previously pointed at OpenMinis/MinisApp, which is the private dev
-    // mirror — every API call 404'd, which we mistranslated as "no release
-    // published". The 0.1-preview release is published as a prerelease on
-    // OpenMinis/OpenMinis with a MinisApp-*.apk asset attached.
-    private const val REPO = "OpenMinis"
+    // [nnn669 fork] The in-app updater is pinned to THIS fork's repo so users
+    // of this build are only ever offered releases from nnn669/minis — never
+    // the upstream OpenMinis/OpenMinis releases (e.g. 0.22-preview), which
+    // would not carry this fork's IPv6 fixes. Do NOT point this back upstream.
+    private const val OWNER = "nnn669"
+    private const val REPO = "minis"
     private const val DOWNLOAD_FILENAME = "minis-update.apk"
     /**
      * Sub-directory of `filesDir` where we stage downloaded update APKs. We
@@ -98,6 +97,9 @@ object UpdateChecker {
      * `0.1 preview` release is flagged as a prerelease, so the old endpoint
      * 404'd and the UI falsely showed "No release published yet". The list
      * endpoint includes prereleases; we filter drafts client-side.
+     *
+     * [nnn669 fork] The endpoint below resolves to nnn669/minis (see OWNER /
+     * REPO), so the checker only ever sees this fork's releases.
      *
      * All network work happens on [Dispatchers.IO]; safe to call from any
      * coroutine scope.
@@ -258,7 +260,7 @@ object UpdateChecker {
     }
 
     /** Public so UI can deep-link users to manual download when GitHub is blocked. */
-    const val RELEASES_URL: String = "https://github.com/OpenMinis/OpenMinis/releases"
+    const val RELEASES_URL: String = "https://github.com/nnn669/minis/releases"
 
     /** Returns (downloadUrl, sizeBytes) for the first .apk asset, or (null, 0). */
     private fun findApkAsset(assets: JSONArray?): Pair<String?, Long> {
@@ -401,13 +403,6 @@ object UpdateChecker {
         context.startActivity(intent)
     }
 
-    /**
-     * Hand [apk] to the system package installer via FileProvider.
-     * Caller must ensure [canInstall] before calling, otherwise the system
-     * silently bounces back to the launcher. Returns false on any
-     * launch failure so callers can surface an error instead of closing
-     * the dialog with no visible feedback.
-     */
     /**
      * If a pending APK from a previous download is still on disk and intact,
      * returns the [File]. The caller is responsible for checking

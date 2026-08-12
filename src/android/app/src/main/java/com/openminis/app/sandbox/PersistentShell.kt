@@ -7,6 +7,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedWriter
+import java.io.File
 import java.io.OutputStreamWriter
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -30,6 +31,7 @@ class PersistentShell(
 
     companion object {
         private const val TAG = "PersistentShell"
+        private const val MIN_PROOT_BYTES = 1024 * 1024L
     }
 
     @Volatile
@@ -78,13 +80,66 @@ class PersistentShell(
         }
     }
 
+    /**
+     * Resolve the proot binary to exec. Prefers a copy staged from
+     * assets/proot-aarch64 (noCompress, byte-identical to the binary built by
+     * deps/build_proot.sh) into filesDir — the assets copy is fully under our
+     * control and never passes through AGP packaging / installd extraction.
+     * Falls back to nativeLibraryDir/libproot.so (the jniLibs twin) if the
+     * asset is missing. Returns null only when neither is usable.
+     */
+    private fun resolveProotBinary(rootfsManager: RootfsManager): File? {
+        val staged = File(context.filesDir, "proot-aarch64")
+        if (!staged.exists() || staged.length() < MIN_PROOT_BYTES) {
+            try {
+                context.assets.open("proot-aarch64").use { input ->
+                    staged.outputStream().use { out -> input.copyTo(out) }
+                }
+                staged.setExecutable(true, false)
+                Log.i(TAG, "Staged proot from assets: $staged (${staged.length()} bytes)")
+            } catch (e: Exception) {
+                Log.w(TAG, "Cannot stage proot from assets (${e.message}); falling back to jniLibs")
+            }
+        }
+        if (staged.exists() && staged.length() >= MIN_PROOT_BYTES) {
+            return staged
+        }
+        val jni = rootfsManager.prootBinary
+        if (jni.exists() && jni.canExecute() && jni.length() >= MIN_PROOT_BYTES) {
+            Log.i(TAG, "Using jniLibs proot: $jni (${jni.length()} bytes)")
+            return jni
+        }
+        Log.e(TAG, "No usable proot binary: staged=$staged exists=${staged.exists()} " +
+            "size=${staged.length()}; jni=$jni exists=${jni.exists()} size=${jni.length()}")
+        return null
+    }
+
     private fun startProcess() {
         Log.i(TAG, "Starting persistent shell process")
 
         val rootfsManager = RootfsManager.getInstance(context)
 
+        // Sanity-check the rootfs before launch: a corrupt/truncated asset
+        // extraction yields a rootfs without /bin/sh and proot would fail
+        // silently at exec time ("can't execve /bin/sh").
+        val rootShell = File(rootfsManager.rootfsDir, "bin/sh")
+        if (!rootShell.exists()) {
+            Log.e(
+                TAG,
+                "Rootfs appears broken: $rootShell missing (rootfsDir=${rootfsManager.rootfsDir} " +
+                    "isInstalled=${rootfsManager.isInstalled}). Reinstall the rootfs from " +
+                    "Settings → Root filesystem."
+            )
+        }
+
+        val prootBin = resolveProotBinary(rootfsManager)
+        if (prootBin == null) {
+            Log.e(TAG, "Aborting shell start: no usable proot binary")
+            return
+        }
+
         val cmd = mutableListOf<String>()
-        cmd.add(rootfsManager.prootBinary.absolutePath)
+        cmd.add(prootBin.absolutePath)
         cmd.add("-0")
         // T141: see PRootKernel.buildProotCommand for rationale — translates
         // hardlinks to symlinks so apk install of binutils/gcc works.
@@ -146,7 +201,13 @@ class PersistentShell(
             env[key] = value
         }
 
-        val p = processBuilder.start()
+        val p: Process
+        try {
+            p = processBuilder.start()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start persistent shell process: ${e.message}", e)
+            throw e
+        }
         process = p
         stdinWriter = BufferedWriter(OutputStreamWriter(p.outputStream, StandardCharsets.UTF_8))
 
@@ -176,6 +237,16 @@ class PersistentShell(
             Thread.sleep(200)
         } catch (_: InterruptedException) {}
 
+        if (!p.isAlive) {
+            val exit = runCatching { p.exitValue() }.getOrNull()
+            Log.e(
+                TAG,
+                "Persistent shell died during startup (exit=$exit) — " +
+                    "see [shell]/PRootStderr logs above for the proot error"
+            )
+        } else {
+            Log.d(TAG, "Persistent shell alive after startup")
+        }
         Log.i(TAG, "Persistent shell started")
     }
 
@@ -215,8 +286,13 @@ class PersistentShell(
                             feedLines(text, cb.lineCallback)
                         }
                     }
+                } else if (text.isNotBlank()) {
+                    // No pending command — this is proot startup chatter or
+                    // stderr (release merges stderr into stdout). Log it so a
+                    // shell that dies during startup leaves a diagnostic trail
+                    // instead of a silent "process exited".
+                    Log.d(TAG, "[shell] ${text.trim().take(4000)}")
                 }
-                // If no pending callback, discard (shell prompt noise etc.)
             }
         } catch (e: Exception) {
             Log.d(TAG, "Reader loop ended: ${e.message}")
@@ -339,33 +415,28 @@ class PersistentShell(
         val writer = stdinWriter ?: return
         withContext(Dispatchers.IO) {
             try {
-                for (key in previousKeys - envVars.keys) {
-                    writer.write("unset $key\n")
-                }
+                // Build export/unset commands
+                val commands = mutableListOf<String>()
                 for ((key, value) in envVars) {
-                    // Escape single quotes in values
-                    val escaped = value.replace("'", "'\\''")
-                    writer.write("export $key='$escaped'\n")
+                    commands.add("export $key=${shellQuote(value)}")
                 }
-                writer.flush()
+                for (key in previousKeys) {
+                    if (key !in envVars) {
+                        commands.add("unset $key")
+                    }
+                }
+                val script = commands.joinToString(" && ")
+                if (script.isNotEmpty()) {
+                    writer.write("$script\n")
+                    writer.flush()
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to apply env vars: ${e.message}")
+                Log.d(TAG, "applyEnvironment failed: ${e.message}")
             }
         }
     }
 
-    /**
-     * Stop the persistent shell.
-     */
-    fun stop() {
-        try { stdinWriter?.close() } catch (_: Exception) {}
-        stdinWriter = null
-        process?.destroyForcibly()
-        process = null
-        pendingCallback?.let {
-            it.onComplete?.invoke(it.output.toString(), -1)
-        }
-        pendingCallback = null
-        Log.i(TAG, "Persistent shell stopped")
+    private fun shellQuote(value: String): String {
+        return "'" + value.replace("'", "'\\''") + "'"
     }
 }

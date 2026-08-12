@@ -251,7 +251,10 @@ build_proot() {
     # sources use paths like `#include "execve/elf.h"`.
     local cppflags="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -DARG_MAX=131072 -I$TALLOC_DIR"
     local cflags="-O2 -Wall -Wextra -fPIE"
-    local ldflags="-Wl,-z,noexecstack -pie -L$BUILD_DIR -ltalloc"
+    # [fix-sandbox] max-page-size=16384: align LOAD segments to 16KB so the
+    # binary also runs on 16KB-page devices (Android 15+). Matches upstream's
+    # NDK r28 default; harmless on 4K-page devices.
+    local ldflags="-Wl,-z,noexecstack -pie -Wl,-z,max-page-size=16384 -L$BUILD_DIR -ltalloc"
 
     (
         cd "$PROOT_DIR/src"

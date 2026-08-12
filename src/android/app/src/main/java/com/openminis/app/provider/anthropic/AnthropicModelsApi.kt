@@ -13,7 +13,11 @@ import okhttp3.Response
 import org.json.JSONObject
 
 object AnthropicModelsApi {
-    private val client = OkHttpClient()
+    // [T-android-ipv6-connect-hang] Prefer IPv4 on dual-stack DNS responses so
+    // a broken IPv6 route can't stall the /v1/models fetch.
+    private val client = OkHttpClient.Builder()
+        .dns(com.openminis.app.network.Ipv4PreferredDns)
+        .build()
 
     /**
      * Fetch models from Anthropic API.

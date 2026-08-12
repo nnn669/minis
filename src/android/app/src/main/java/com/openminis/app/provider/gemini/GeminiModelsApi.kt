@@ -12,7 +12,11 @@ import okhttp3.Request
 import org.json.JSONObject
 
 object GeminiModelsApi {
-    private val client = OkHttpClient()
+    // [T-android-ipv6-connect-hang] Prefer IPv4 on dual-stack DNS responses so
+    // a broken IPv6 route can't stall the /v1beta/models fetch.
+    private val client = OkHttpClient.Builder()
+        .dns(com.openminis.app.network.Ipv4PreferredDns)
+        .build()
     private val cache = ProviderModelsCache("gemini")
 
     /**

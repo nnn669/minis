@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.20-preview"
+        versionCode = 21
+        versionName = "0.21-preview"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -184,9 +184,11 @@ dependencies {
     // Security (EncryptedSharedPreferences)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // OkHttp
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
+    // OkHttp — [T-android-ipv6-connect-hang] 5.4.0 enables Happy Eyeballs so
+    // dual-stack hosts race IPv6 vs IPv4 and the working IPv4 connection wins
+    // even when the resolver lists IPv6 first.
+    implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("com.squareup.okhttp3:okhttp-sse:5.4.0")
 
     // Kotlinx Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
@@ -240,7 +242,7 @@ dependencies {
     // Testing — JVM unit tests
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.4.0")
     testImplementation("org.json:json:20231013")
 
     // Testing — Instrumented (on-device) tests

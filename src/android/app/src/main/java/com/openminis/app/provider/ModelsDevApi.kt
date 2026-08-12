@@ -42,6 +42,9 @@ object ModelsDevApi {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        // [T-android-ipv6-connect-hang] Prefer IPv4 on dual-stack DNS responses
+        // so a broken IPv6 route can't stall the models.dev refresh.
+        .dns(com.openminis.app.network.Ipv4PreferredDns)
         .build()
 
     /** Must be called once at app startup with application context. */

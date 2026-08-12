@@ -16,7 +16,11 @@ import org.json.JSONObject
 
 object OpenAIModelsApi {
     private const val TAG = "OpenAIModelsApi"
-    private val client = OkHttpClient()
+    // [T-android-ipv6-connect-hang] Prefer IPv4 on dual-stack DNS responses so
+    // a broken IPv6 route can't stall the /v1/models fetch.
+    private val client = OkHttpClient.Builder()
+        .dns(com.openminis.app.network.Ipv4PreferredDns)
+        .build()
     private val cache = ProviderModelsCache("openai")
 
     /**

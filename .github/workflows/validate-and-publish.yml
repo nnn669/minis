@@ -68,19 +68,31 @@ jobs:
 
       # 2) Native deps required for a complete APK (PRoot + Alpine rootfs)
       # [fix-sandbox] Pin NDK r28 (16KB-page capable, matches upstream's
-      # working build) and VERIFY the stamp: a prior run silently built with
-      # r27d (env not propagated), producing a 4K-aligned proot that fails to
-      # start on some devices. If the stamp is wrong the job fails loudly.
+      # working build) and VERIFY it: $VAR in a workflow env: block is NOT
+      # expanded by GitHub Actions (only ${{ }} is), so the previous run
+      # silently fell back to the runner's preinstalled r27d. Now we export
+      # inside the run block (where $ANDROID_HOME expands) and fail loudly
+      # if the r28 dir is missing or the built binary is not 16KB-aligned.
       - name: Build native deps (PRoot + rootfs)
-        env:
-          ANDROID_NDK_HOME: $ANDROID_HOME/ndk/28.0.12433566
         run: |
+          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/28.0.12433566"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          if [ ! -d "$ANDROID_NDK_HOME" ]; then
+            echo "ERROR: NDK r28 dir missing: $ANDROID_NDK_HOME"
+            echo "Installed NDKs:"; ls "${ANDROID_HOME}/ndk/" || true
+            exit 1
+          fi
           ./deps/build_proot.sh
           ./scripts/prepare_android_sandbox.sh
-          echo "--- verify proot NDK stamp ---"
-          readelf -n src/android/app/src/main/assets/proot-aarch64 | grep -A2 "android.ident" | head -3
-          file src/android/app/src/main/assets/proot-aarch64 | tee /tmp/proot-stamp.txt
-          grep -q "r28\|16KB" /tmp/proot-stamp.txt || { echo "ERROR: proot not built with r28 / 16KB alignment"; exit 1; }
+          echo "--- verify proot 16KB alignment (LOAD align 0x4000) ---"
+          readelf -l src/android/app/src/main/assets/proot-aarch64 | grep -A1 "^  LOAD" | tee /tmp/proot-phdr.txt
+          ALIGN_OK=$(grep -c "0x4000" /tmp/proot-phdr.txt || true)
+          if [ "$ALIGN_OK" -lt 3 ]; then
+            echo "ERROR: proot LOAD segments are not 16KB-aligned (expect 0x4000)"
+            exit 1
+          fi
+          strings src/android/app/src/main/assets/proot-aarch64 | grep -oE "r2[0-9]+(-[a-z0-9]+)?" | sort -u | head -3
 
       # 3) Assemble the release APK
       # [fix-sandbox] Release build (debuggable=false) — the debug APK's

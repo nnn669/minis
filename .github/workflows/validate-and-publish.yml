@@ -35,10 +35,22 @@ jobs:
             ndk;28.0.12433566
             cmake;3.22.1
 
-      - name: Prepare customization properties
+      # The public mirror ships an EMPTY ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
+      # (provider-customization.properties.example), but
+      # AnthropicProvider.resolveSystemPrompt reads that value unconditionally
+      # and ClaudeOAuthManager throws IllegalStateException when it is blank —
+      # so AnthropicProviderTest can never go green on the public mirror
+      # without a value. Inject a non-empty TEST-ONLY value so the unit-test
+      # gate passes; the APK itself is packaged from the blank example below,
+      # keeping it identical to the upstream public build.
+      - name: Prepare customization properties (test value)
         run: |
           cp src/android/app/provider-customization.properties.example \
              src/android/app/provider-customization.properties
+          printf 'ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=You are Claude Code, Anthropic\x27s official CLI for Claude.\n' \
+            >> src/android/app/provider-customization.properties
+          grep -q 'ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=You are Claude Code' \
+            src/android/app/provider-customization.properties
 
       # 1) Validation gate: JVM unit tests (compiles main sources incl.
       #    okhttp 5.4.0 path; runs Ipv4PreferredDnsTest etc.)
@@ -46,6 +58,13 @@ jobs:
         run: |
           cd src/android
           ./gradlew -Dorg.gradle.jvmargs=-Xmx4g :app:testDebugUnitTest --stacktrace
+
+      # Restore the blank public-mirror value so the packaged APK carries no
+      # injected test placeholder.
+      - name: Reset customization properties for packaging
+        run: |
+          cp src/android/app/provider-customization.properties.example \
+             src/android/app/provider-customization.properties
 
       # 2) Native deps required for a complete APK (PRoot + Alpine rootfs)
       - name: Build native deps (PRoot + rootfs)

@@ -101,12 +101,9 @@ fun AboutScreen(onBack: () -> Unit) {
                 icon = Icons.Outlined.Code,
                 iconColor = tileBlue,
                 title = stringResource(R.string.about_github_repository),
-                // Settings → ABOUT siblings (Privacy Policy / Submit GitHub
-                // Issues) all use openExternalUrl directly. The
-                // LocalInAppBrowserLauncher ambient defaults to a no-op when
-                // no InAppBrowserHost is in the tree above this screen — and
-                // nothing wraps Settings, so the row used to be a dead tap.
-                onClick = { openExternalUrl(context, "https://github.com/OpenMinis/OpenMinis") },
+                // [nnn669 fork] Point at this fork's repo so the About link
+                // matches the in-app updater source (see UpdateChecker).
+                onClick = { openExternalUrl(context, "https://github.com/nnn669/minis") },
                 trailing = { ExternalLinkIcon() },
                 showDivider = false,
             )

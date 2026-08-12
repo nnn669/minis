@@ -1,0 +1,97 @@
+name: Validate & publish v0.21-preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate-build-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-36
+            build-tools;34.0.0
+            build-tools;36.0.0
+            ndk;27.0.12077973
+            ndk;28.0.12433566
+            cmake;3.22.1
+
+      - name: Prepare customization properties
+        run: |
+          cp src/android/app/provider-customization.properties.example \
+             src/android/app/provider-customization.properties
+
+      # 1) Validation gate: JVM unit tests (compiles main sources incl.
+      #    okhttp 5.4.0 path; runs Ipv4PreferredDnsTest etc.)
+      - name: Run unit tests
+        run: |
+          cd src/android
+          ./gradlew -Dorg.gradle.jvmargs=-Xmx4g :app:testDebugUnitTest --stacktrace
+
+      # 2) Native deps required for a complete APK (PRoot + Alpine rootfs)
+      - name: Build native deps (PRoot + rootfs)
+        env:
+          ANDROID_NDK_HOME: $ANDROID_HOME/ndk/28.0.12433566
+        run: |
+          ./deps/build_proot.sh
+          ./scripts/prepare_android_sandbox.sh
+
+      # 3) Assemble the test APK
+      - name: Assemble debug APK
+        run: |
+          cd src/android
+          ./gradlew -Dorg.gradle.jvmargs=-Xmx4g :app:assembleDebug --stacktrace
+
+      - name: Publish test release v0.21-preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK=$(find src/android/app/build/outputs/apk -name "*.apk" | head -n1)
+          test -n "$APK"
+          echo "APK: $APK ($(du -h "$APK" | cut -f1))"
+          cat > /tmp/release-notes.md <<'EOF'
+          ## v0.21-preview（2026-08-12）测试版
+
+          ### 修复：模型连接因 IPv6 挂起（30s 超时）
+          - 日志证据：api.ciyuan.fast 等双栈域名 DNS 返回 IPv6 在前，OkHttp 4.x 按序拨号只连 IPv6，被半坏 IPv6 路由黑洞 30s 后取消，重试 3 次全部卡在同一 IPv6 地址，永远轮不到同批返回的健康 IPv4 地址。
+          - 新增 Ipv4PreferredDns（okhttp3.Dns）：DNS 结果稳定排序，IPv4 排前、IPv6 保底；接入 OpenAI / Anthropic / Gemini /v1/models 与 models.dev 客户端。
+          - okhttp / okhttp-sse / mockwebserver 4.12.0 → 5.4.0：聊天主路径（OpenAIProvider 等）启用 Happy Eyeballs 双栈竞速，IPv4 秒连胜出。
+          - 新增 Ipv4PreferredDnsTest 单元测试（4 条）。
+          - 版本 0.20-preview → 0.21-preview（versionCode 21）。
+
+          提交：3ee63db
+          EOF
+          if gh release view v0.21-preview >/dev/null 2>&1; then
+            gh release upload v0.21-preview "$APK" --clobber
+          else
+            gh release create v0.21-preview "$APK" \
+              --title "v0.21-preview" \
+              --notes-file /tmp/release-notes.md
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-v0.21-preview-apk
+          path: src/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

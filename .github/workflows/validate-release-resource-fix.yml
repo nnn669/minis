@@ -1,0 +1,94 @@
+name: Validate release resource packaging fix
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: validate-release-resource-fix-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out fix branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Apply duplicate OSGi manifest exclusion
+        shell: bash
+        run: |
+          FILE='src/android/app/build.gradle.kts'
+          test "$(grep -c 'META-INF/versions/9/OSGI-INF/MANIFEST.MF' "$FILE" || true)" -eq 0
+          perl -0pi -e 's/    testOptions \{\n/    packaging {\n        resources {\n            excludes += "META-INF\/versions\/9\/OSGI-INF\/MANIFEST.MF"\n        }\n    }\n\n    testOptions {\n/' "$FILE"
+          test "$(grep -c 'META-INF/versions/9/OSGI-INF/MANIFEST.MF' "$FILE")" -eq 1
+          git diff --check
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android toolchain
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare build inputs
+        shell: bash
+        run: |
+          cp src/android/app/provider-customization.properties.example \
+            src/android/app/provider-customization.properties
+          ./deps/build_proot.sh clean
+          ./scripts/prepare_android_sandbox.sh
+          test -s src/android/app/src/main/assets/proot-aarch64
+          test -s src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+          test -s src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+          file src/android/app/src/main/assets/proot-aarch64 | grep -q 'ARM aarch64'
+
+      - name: Run complete JVM unit test suite
+        working-directory: src/android
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Run debug lint
+        working-directory: src/android
+        run: ./gradlew --no-daemon :app:lintDebug
+
+      - name: Validate release resources and R8
+        working-directory: src/android
+        run: |
+          ./gradlew --no-daemon \
+            :app:mergeReleaseJavaResource \
+            :app:minifyReleaseWithR8
+
+      - name: Commit verified fix and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/android/app/build.gradle.kts
+          git rm .github/workflows/validate-release-resource-fix.yml
+          git commit -m 'fix(android): exclude duplicate OSGi manifest resource'
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"

@@ -138,12 +138,21 @@ tasks.named("preBuild") { dependsOn(copyBashismRules) }
 // Wired to DEBUG asset merges only: src/debug/assets never reaches a release
 // APK, so the tooling docs can't ship to users. `assets` is also declared as an
 // output so Gradle re-runs this when the skill changes but skips it otherwise.
+//
+// [ci-fix] The skill source lives OUTSIDE the repo (.claude/skills/debug-server
+// exists only on dev machines). Gradle validates declared inputs BEFORE onlyIf
+// is evaluated, so an absent dir fails the build with WorkValidationException
+// even though the task is meant to be skipped — inputs.dir(...).optional() did
+// not suppress that validation. Declare each input only when it exists at
+// configuration time and require BOTH in onlyIf: on CI/public mirror the task
+// is skipped cleanly and :app:assembleDebug proceeds without the debug-only
+// skill assets.
 val stageDebugSkillAssets by tasks.registering(Exec::class) {
     val script = rootProject.file("../../scripts/gen_debug_skill_android.sh")
     val skillDir = rootProject.file("../../.claude/skills/debug-server")
-    onlyIf { script.exists() }
-    inputs.dir(skillDir).optional()
-    inputs.file(script).optional()
+    onlyIf { script.exists() && skillDir.exists() }
+    if (script.exists()) inputs.file(script)
+    if (skillDir.exists()) inputs.dir(skillDir)
     outputs.dir(layout.projectDirectory.dir("src/debug/assets/debug-skill"))
     commandLine("bash", script.absolutePath)
 }

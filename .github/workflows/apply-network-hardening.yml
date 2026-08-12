@@ -1,0 +1,46 @@
+name: Apply network hardening follow-up
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/android-network-transition-pool-eviction
+          fetch-depth: 0
+
+      - name: Apply shared HTTP client settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          provider_files=(
+            src/android/app/src/main/java/com/openminis/app/provider/openai/OpenAIProvider.kt
+            src/android/app/src/main/java/com/openminis/app/provider/anthropic/AnthropicProvider.kt
+            src/android/app/src/main/java/com/openminis/app/provider/gemini/GeminiProvider.kt
+          )
+          for file in "${provider_files[@]}"; do
+            perl -0pi -e 's/(\.connectionPool\(com\.openminis\.app\.network\.NetworkMonitor\.sharedLLMConnectionPool\)\n)(        \.build\(\))/$1        .fastFallback(true)\n$2/g' "$file"
+            grep -q '\.fastFallback(true)' "$file"
+          done
+          perl -0pi -e 's/(\.readTimeout\(15, TimeUnit\.SECONDS\)\n)(        \.build\(\))/$1        .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)\n        .fastFallback(true)\n$2/g' \
+            src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
+          grep -q 'sharedLLMConnectionPool' src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
+          grep -q '\.fastFallback(true)' src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
+
+      - name: Commit and remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-network-hardening.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/android/app/src/main/java/com/openminis/app/provider .github/workflows/apply-network-hardening.yml
+          git commit -m "fix(android): harden all HTTP clients against route changes"
+          git push origin HEAD:fix/android-network-transition-pool-eviction

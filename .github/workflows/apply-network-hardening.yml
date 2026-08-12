@@ -1,48 +1,60 @@
-name: Apply network hardening follow-up
+name: Validate network transition handling
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
-  apply:
+  validate:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - name: Check out branch
+      - name: Check out pull request branch
         uses: actions/checkout@v4
         with:
-          ref: fix/android-network-transition-pool-eviction
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
+          submodules: false
 
-      - name: Apply shared HTTP client settings
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Add models.dev client to the shared route-aware pool
         shell: bash
         run: |
           set -euo pipefail
-          provider_files=(
-            src/android/app/src/main/java/com/openminis/app/provider/openai/OpenAIProvider.kt
-            src/android/app/src/main/java/com/openminis/app/provider/anthropic/AnthropicProvider.kt
-            src/android/app/src/main/java/com/openminis/app/provider/gemini/GeminiProvider.kt
-          )
-          for file in "${provider_files[@]}"; do
-            perl -0pi -e 's/(\.connectionPool\(com\.openminis\.app\.network\.NetworkMonitor\.sharedLLMConnectionPool\)\n)/$1        .fastFallback(true)\n/' "$file"
-            test "$(grep -c '\.fastFallback(true)' "$file")" -eq 1
-          done
-          perl -0pi -e 's/(\.readTimeout\(15, TimeUnit\.SECONDS\)\n)/$1        .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)\n        .fastFallback(true)\n/' \
-            src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
-          grep -q 'sharedLLMConnectionPool' src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
-          grep -q '\.fastFallback(true)' src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
+          file=src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt
+          perl -0pi -e 's/(\.readTimeout\(15, TimeUnit\.SECONDS\)\n)(        \.build\(\))/$1        .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)\n$2/' "$file"
+          test "$(grep -c 'NetworkMonitor.sharedLLMConnectionPool' "$file")" -eq 1
 
-      - name: Commit and remove temporary workflow
+      - name: Compile and run network route tests
+        working-directory: src/android
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest \
+            --tests com.openminis.app.network.AvailableNetworkTrackerTest \
+            --stacktrace
+
+      - name: Commit validated source and remove temporary workflow
         shell: bash
         run: |
           set -euo pipefail
           rm .github/workflows/apply-network-hardening.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/android/app/src/main/java/com/openminis/app/provider .github/workflows/apply-network-hardening.yml
-          git commit -m "fix(android): harden all HTTP clients against route changes"
-          git push origin HEAD:fix/android-network-transition-pool-eviction
+          git add \
+            src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt \
+            .github/workflows/apply-network-hardening.yml
+          git commit -m "fix(android): share route-aware pool with models registry"
+          git push origin HEAD:${{ github.head_ref }}

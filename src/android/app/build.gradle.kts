@@ -36,10 +36,12 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        // [nnn669 fork] 0.21-preview → 0.22-preview: in-app updater now reads
-        // nnn669/minis releases (was upstream OpenMinis/OpenMinis).
-        versionCode = 22
-        versionName = "0.22-preview"
+        // [nnn669 fork] 0.22-preview → 0.23-preview: the sandbox is fixed by
+        // shipping a RELEASE build (the 0.22 release APK was a debug build
+        // whose PRoot sandbox dies on Android 15 → "[Shell not running]").
+        // In-app updater still reads nnn669/minis releases.
+        versionCode = 23
+        versionName = "0.23-preview"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

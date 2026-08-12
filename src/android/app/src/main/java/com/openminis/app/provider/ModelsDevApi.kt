@@ -42,6 +42,7 @@ object ModelsDevApi {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .build()
 
     /** Must be called once at app startup with application context. */

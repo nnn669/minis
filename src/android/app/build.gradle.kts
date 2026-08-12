@@ -36,8 +36,10 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.21-preview"
+        // [nnn669 fork] 0.21-preview → 0.22-preview: in-app updater now reads
+        // nnn669/minis releases (was upstream OpenMinis/OpenMinis).
+        versionCode = 22
+        versionName = "0.22-preview"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

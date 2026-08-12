@@ -93,6 +93,8 @@ jobs:
             exit 1
           fi
           strings src/android/app/src/main/assets/proot-aarch64 | grep -oE "r2[0-9]+(-[a-z0-9]+)?" | sort -u | head -3
+          echo "--- assets ---"
+          ls -lh src/android/app/src/main/assets/ | grep -E "proot|alpine" || true
 
       # 3) Assemble the release APK
       # [fix-sandbox] Release build (debuggable=false) — the debug APK's
@@ -114,21 +116,23 @@ jobs:
           test -n "$APK"
           echo "APK: $APK ($(du -h "$APK" | cut -f1))"
           cat > /tmp/release-notes.md <<'EOF'
-          ## v0.23-preview（2026-08-13）测试版
+          ## v0.23-preview（2026-08-13）测试版 — 沙盒诊断修复版
 
-          ### 修复：沙盒 / Shell 无法启动（本次核心）
-          - 根因：此前发布到 v0.22-preview 的 APK 是 **debug 构建**（debuggable=true），PRoot 沙箱在调试运行时（malloc debug / 调试态 ptrace）下启动即崩溃，表现为 proot 进程启动后立即退出、所有 shell 命令返回 "[Shell not running]"、根文件系统设置页空白。
-          - 修复：CI 改为 **assembleRelease**（release 构建 debuggable=false，沿用 debug 签名、无需 keystore），与上游正常 APK 一致。
-          - 同步：proot 改用 NDK r28 构建并加 16KB 页对齐（-Wl,-z,max-page-size=16384），与上游二进制对齐；CI 增加 NDK r28 显式校验（readelf LOAD 对齐检查），防止再静默退回旧 NDK；prepare_android_sandbox.sh 修复失效的 Termux proot 下载链接（5.1.107-70 → 5.1.107.89）。
-          - 已安装 0.21 / 0.22 的用户：App 内"检查更新"即可收到本包（更新源已固定为本仓库）。
+          ### 本次覆盖发布：沙盒 / Shell 无法启动（诊断 + 修复）
+          - 0.23 首版只验证了"release 构建"假设，未解决用户设备上的问题；本版补齐启动诊断并移除两个最可疑的静默杀手：
+            1. **proot 启动错误不再被吞**：此前 readLoop 只在命令回调挂起时消费输出，proot 在 200ms 启动窗口内的报错（stderr 合并进 stdout）被静默丢弃，现象只有光秃秃的 "process exited"。现在无回调时的输出也打进日志（`[shell]` 标签），proot 的真实错误（ptrace/rootfs/native-offload/argv）可直接定位。
+            2. **proot 改从 assets/proot-aarch64 复制到 filesDir 执行**：不再依赖 nativeLibraryDir/libproot.so——该副本经 AGP 打包 + 系统 installd 提取，静态链接 PIE 伪装 .so 可能在这两个环节被破坏。
+            3. **启动前校验 rootfs /bin/sh**：rootfs 解压损坏时显式报错并提示重装，不再让 proot 哑火。
+          - 版本号沿用 0.23-preview（versionCode 23），已装 0.22 及更早版本的用户在 App 内"检查更新"即可收到。
 
           ### 修复：内置升级不再推送上游版本
           - 更新源固定为本仓库 nnn669/minis，不再检查上游 OpenMinis/OpenMinis 的 Release。
 
-          提交：c478e301（release 构建 + NDK r28 proot）、1097d58e（NDK r28 CI 校验）、a75fa69（更新源）、4fbe2ec（About 链接）、fa3bcb0（版本号）
+          提交：4d1f2bd（PersistentShell 启动诊断 + assets proot 来源）、c478e301（release 构建 + NDK r28 proot）、1097d58e（NDK r28 CI 校验）、a75fa69（更新源）、4fbe2ec（About 链接）、fa3bcb0（版本号）
           EOF
           if gh release view v0.23-preview >/dev/null 2>&1; then
             gh release upload v0.23-preview "$APK" --clobber
+            gh release edit v0.23-preview --notes-file /tmp/release-notes.md
           else
             gh release create v0.23-preview "$APK" \
               --title "v0.23-preview" \

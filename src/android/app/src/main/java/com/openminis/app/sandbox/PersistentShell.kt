@@ -46,6 +46,9 @@ class PersistentShell(
     @Volatile
     private var pendingCallback: CommandCallback? = null
 
+    /** Guards pendingCallback hand-off between readLoop / executeCommand / stop. */
+    private val callbackLock = Any()
+
     val isAlive: Boolean
         get() = process?.isAlive == true
 
@@ -391,6 +394,33 @@ class PersistentShell(
                 result
             }
         }
+    }
+
+    /**
+     * Stop this persistent shell: cancel any pending command callback, close
+     * stdin and destroy the underlying process. The shell is removed from the
+     * registry by the caller (ExecutionCoordinator) and recreated on the next
+     * command. Safe to call more than once.
+     */
+    fun stop() {
+        synchronized(callbackLock) {
+            val cb = pendingCallback
+            if (cb != null) {
+                cb.onComplete?.invoke(cb.output.toString() + "\n[Shell stopped]", -1)
+                pendingCallback = null
+            }
+        }
+        try {
+            stdinWriter?.close()
+        } catch (_: Exception) {
+        }
+        stdinWriter = null
+        try {
+            process?.destroy()
+        } catch (_: Exception) {
+        }
+        process = null
+        Log.i(TAG, "Persistent shell stopped")
     }
 
     /**
